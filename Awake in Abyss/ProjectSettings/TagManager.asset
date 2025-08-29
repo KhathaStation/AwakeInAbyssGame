@@ -3,12 +3,16 @@
 --- !u!78 &1
 TagManager:
   serializedVersion: 2
-  tags: []
+  tags:
+  - Ground
+  - Stand
+  - Enemy
+  - Booster
   layers:
   - Default
   - TransparentFX
   - Ignore Raycast
-  - 
+  - Groundlayer
   - Water
   - UI
   - 
