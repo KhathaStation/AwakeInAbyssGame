@@ -18,10 +18,26 @@ public class PlayerController : MonoBehaviour
 
     [Header("Ground Check")]
     public Transform groundCheck;
-    public float groundCheckRadius = 0.2f;
+    public float groundCheckRadius = 0.25f;
+    public LayerMask groundLayer;
+    public float rayLength = 0.1f;
 
     [Header("Camera Reset")]
     public float resetMargin = 0.05f;
+
+    [Header("Score System")]
+    public int score = 0;
+
+    [Header("Horizontal Bounce Settings")]
+    public float bounceMultiplier = 0.2f;
+    public float damping = 0.9f;
+
+    [Header("Smooth Reset Settings")]
+    public float resetDuration = 0.5f;
+
+    [Header("Jump / Gravity Settings")]
+    public float fallMultiplier = 2.5f;
+    public float lowJumpMultiplier = 2f;
 
     private Rigidbody2D rb;
     private bool isGrounded;
@@ -30,6 +46,7 @@ public class PlayerController : MonoBehaviour
 
     private Coroutine dissolveCoroutine;
     private GameObject currentGroundStand;
+    private Coroutine resetCoroutine = null;
 
     void Start()
     {
@@ -38,14 +55,15 @@ public class PlayerController : MonoBehaviour
 
     void Update()
     {
-        CheckGround();
         HandleMovement();
         HandleJump();
         HandlePullDown();
     }
 
-    void LateUpdate()
+    void FixedUpdate()
     {
+        CheckGround();
+        ApplyBetterJump();
         CheckOutOfCamera();
     }
 
@@ -57,16 +75,9 @@ public class PlayerController : MonoBehaviour
             return;
         }
 
-        Collider2D[] groundColliders = Physics2D.OverlapCircleAll(groundCheck.position, groundCheckRadius);
-        isGrounded = false;
-        foreach (Collider2D col in groundColliders)
-        {
-            if (col.CompareTag("Ground") || col.CompareTag("Stand"))
-            {
-                isGrounded = true;
-                break;
-            }
-        }
+        Collider2D[] hits = Physics2D.OverlapCircleAll(groundCheck.position, groundCheckRadius, groundLayer);
+        bool rayHit = Physics2D.Raycast(groundCheck.position, Vector2.down, rayLength, groundLayer);
+        isGrounded = hits.Length > 0 || rayHit;
     }
 
     void HandleMovement()
@@ -92,6 +103,18 @@ public class PlayerController : MonoBehaviour
         {
             rb.velocity = new Vector2(rb.velocity.x, -pullForce);
             isPullingDown = true;
+        }
+    }
+
+    void ApplyBetterJump()
+    {
+        if (rb.velocity.y < 0)
+        {
+            rb.velocity += Vector2.up * Physics2D.gravity.y * (fallMultiplier - 1) * Time.fixedDeltaTime;
+        }
+        else if (rb.velocity.y > 0 && !Input.GetButton("Jump"))
+        {
+            rb.velocity += Vector2.up * Physics2D.gravity.y * (lowJumpMultiplier - 1) * Time.fixedDeltaTime;
         }
     }
 
@@ -139,9 +162,16 @@ public class PlayerController : MonoBehaviour
         dissolveCoroutine = null;
     }
 
-    // ======= Booster Boost Float =======
+    // ======= Booster & Coin =======
     private void OnTriggerEnter2D(Collider2D collision)
     {
+        if (collision.CompareTag("Coin"))
+        {
+            score += 1;
+            Debug.Log("Picked up Coin! Score: " + score);
+            Destroy(collision.gameObject);
+        }
+
         if (collision.CompareTag("Booster"))
         {
             StartCoroutine(BoostFloatCoroutine());
@@ -173,19 +203,77 @@ public class PlayerController : MonoBehaviour
         isBoosting = false;
     }
 
-    // ======= Reset Position กลาง Camera ทุกครั้งที่หลุดจอ =======
+    // ======= Horizontal Bounce + Smooth Reset Bottom (Ease-Out) =======
     void CheckOutOfCamera()
     {
-        Vector3 viewPos = Camera.main.WorldToViewportPoint(transform.position);
+        float leftX = Camera.main.ViewportToWorldPoint(new Vector3(0 + resetMargin, 0, -Camera.main.transform.position.z)).x;
+        float rightX = Camera.main.ViewportToWorldPoint(new Vector3(1 - resetMargin, 0, -Camera.main.transform.position.z)).x;
+        float bottomY = Camera.main.ViewportToWorldPoint(new Vector3(0, 0, -Camera.main.transform.position.z)).y;
 
-        if (viewPos.x < 0 - resetMargin || viewPos.x > 1 + resetMargin ||
-            viewPos.y < 0 - resetMargin || viewPos.y > 1 + resetMargin)
+        Vector2 newPos = rb.position;
+
+        // X: Horizontal Bounce
+        if (rb.position.x < leftX)
         {
-            Vector3 camCenter = Camera.main.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, -Camera.main.transform.position.z));
-            camCenter.z = 0f;
-
-            rb.position = camCenter;
-            rb.velocity = Vector2.zero;
+            newPos.x = leftX;
+            newPos.y += 0.01f;
+            rb.velocity = new Vector2(Mathf.Abs(rb.velocity.x) * bounceMultiplier * damping, rb.velocity.y);
+            rb.MovePosition(newPos);
         }
+        else if (rb.position.x > rightX)
+        {
+            newPos.x = rightX;
+            newPos.y += 0.01f;
+            rb.velocity = new Vector2(-Mathf.Abs(rb.velocity.x) * bounceMultiplier * damping, rb.velocity.y);
+            rb.MovePosition(newPos);
+        }
+
+        // Y: Smooth Reset ถ้าตกต่ำเกินขอบล่าง
+        if (rb.position.y < bottomY && resetCoroutine == null)
+        {
+            resetCoroutine = StartCoroutine(SmoothResetPosition());
+        }
+    }
+
+    private IEnumerator SmoothResetPosition()
+    {
+        Vector3 startPos = rb.position;
+        Vector3 targetPos = Camera.main.ViewportToWorldPoint(new Vector3(0.5f, 0.5f, -Camera.main.transform.position.z));
+        targetPos.z = 0f;
+
+        rb.velocity = Vector2.zero;
+
+        float elapsed = 0f;
+
+        while (elapsed < resetDuration)
+        {
+            elapsed += Time.fixedDeltaTime;
+            float t = Mathf.Clamp01(elapsed / resetDuration);
+
+            // Ease-out cubic
+            float easedT = 1 - Mathf.Pow(1 - t, 3);
+            rb.MovePosition(Vector3.Lerp(startPos, targetPos, easedT));
+
+            yield return new WaitForFixedUpdate();
+        }
+
+        rb.position = targetPos;
+        resetCoroutine = null;
+    }
+
+    // ======= Debug Gizmos สำหรับ GroundCheck =======
+    private void OnDrawGizmosSelected()
+    {
+        if (groundCheck == null)
+            return;
+
+        // วาดวงกลม GroundCheck
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(groundCheck.position, groundCheckRadius);
+
+        // วาด Raycast ลงล่าง
+        Gizmos.color = Color.red;
+        Vector3 rayEnd = groundCheck.position + Vector3.down * rayLength;
+        Gizmos.DrawLine(groundCheck.position, rayEnd);
     }
 }
